@@ -191,6 +191,16 @@
   resize: none;
 }
 
+.jsoneditor tr.dragging {
+  cursor: move;
+}
+
+.jsoneditor tr.dragging.not-allowed,
+.jsoneditor tr.dragging.not-allowed button.dragarea,
+.jsoneditor tr.dragging.not-allowed button.contextmenu {
+  cursor: not-allowed;
+}
+
 .jsoneditor tr.highlight {
   background-color: #FFFFAB;
 }

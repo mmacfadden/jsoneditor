@@ -1188,7 +1188,7 @@ Node.prototype._updateDomField = function () {
  *                            case of invalid data
  * @private
  */
-Node.prototype._getDomField = function(silent) {
+Node.prototype._getDomField = function(silent, final) {
   if (this.dom.field && this.fieldEditable) {
     this.fieldInnerText = util.getInnerText(this.dom.field);
   }
@@ -1201,16 +1201,59 @@ Node.prototype._getDomField = function(silent) {
         var oldField = this.field;
         this.field = field;
         this.parent._onChildFieldRenamed(this, oldField, field);
+
         this.editor._onAction('editField', {
           'node': this,
           'oldValue': oldField,
           'newValue': field,
           'oldSelection': this.editor.selection,
-          'newSelection': this.editor.getSelection()
+          'newSelection': this.editor.getSelection(),
+          'duplicate' : this.parent._isDuplicateField(this.field)
         });
+      }
+
+      var domField = this.dom.field;
+
+      // Handle duplicate field edits
+      if (this.parent._isDuplicateField(this.field) && final) {
+        if (this.editor.options.duplicates === 'overwrite') {
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {
+              var remove = callback(node);
+              if (remove) {
+                node.parent._removeOtherDuplicateFields(node);
+              } else {
+                util.selectContentEditable(domField);
+                domField.focus();
+              }
+            }, 0);
+          } else {
+            this.parent._removeOtherDuplicateFields(this);
+          }
+        } else if (this.editor.options.duplicates === 'not-allowed') {
+          util.selectContentEditable(domField);
+          domField.focus();
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {callback(node)}, 0)
+          }
+        } else {
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {callback(node)}, 0)
+          }
+        }
       }
     }
     catch (err) {
+      console.log(err);
       this.field = undefined;
       // TODO: sent an action here, with the new, invalid value?
       if (silent !== true) {
@@ -1258,6 +1301,36 @@ Node.prototype._unmarkDuplicateField = function(child) {
     util.removeClassName(child.dom.field, 'duplicate');
     child.dom.tr.title = "";
     child.dom.field.title = "";
+  }
+};
+
+/**
+ * A helper function to determine if the given field in an object node has
+ * more than one node with that field name.
+ * @param field The field name to check
+ * @return {boolean} true if there is more than one object with the same field.
+ * @private
+ */
+Node.prototype._isDuplicateField = function(field) {
+  return this.type == "object" && this.childFields[field] && this.childFields[field].length > 1;
+};
+
+/**
+ * A helper method that removes all other nodes in the same object with the
+ * same field name as the one passed in.  After the method call, the passed
+ * in node will be the only remaining child with the given field name.
+ * @param child The child to keep.
+ * @private
+ */
+Node.prototype._removeOtherDuplicateFields = function(child) {
+  var children = this.childFields[child.field];
+  if (children) {
+    for(var i = 0; i < children.length; i++) {
+      var otherChild = children[i];
+      if (otherChild != child) {
+        this.removeChild(otherChild);
+      }
+    }
   }
 };
 
@@ -1397,6 +1470,7 @@ Node.prototype.getDom = function() {
  */
 Node.prototype._onDragStart = function (event) {
   var node = this;
+
   if (!this.mousemove) {
     this.mousemove = util.addEventListener(document, 'mousemove',
         function (event) {
@@ -1420,6 +1494,7 @@ Node.prototype._onDragStart = function (event) {
     'level': this.getLevel()
   };
   document.body.style.cursor = 'move';
+  util.addClassName(this.dom.tr, 'dragging');
 
   event.preventDefault();
 };
@@ -1558,6 +1633,15 @@ Node.prototype._onDrag = function (event) {
     // update the dragging parameters when moved
     this.drag.mouseX = mouseX;
     this.drag.level = this.getLevel();
+
+    if (this.parent._isDuplicateField(this.field) &&
+        this.editor.options.duplicates == 'not-allowed') {
+      util.addClassName(this.dom.tr, 'not-allowed');
+      document.body.style.cursor = 'not-allowed';
+    } else {
+      document.body.style.cursor = 'move';
+      util.removeClassName(this.dom.tr, 'not-allowed');
+    }
   }
 
   // auto scroll when hovering around the top of the editor
@@ -1572,20 +1656,33 @@ Node.prototype._onDrag = function (event) {
  * @private
  */
 Node.prototype._onDragEnd = function (event) {
-  var params = {
-    'node': this,
-    'startParent': this.drag.startParent,
-    'startIndex': this.drag.startIndex,
-    'endParent': this.parent,
-    'endIndex': this.parent.childs.indexOf(this)
-  };
-  if ((params.startParent != params.endParent) ||
-      (params.startIndex != params.endIndex)) {
-    // only register this action if the node is actually moved to another place
-    this.editor._onAction('moveNode', params);
+  var moved = true;
+  var duplicate = this.parent._isDuplicateField(this.field);
+  if (duplicate && this.editor.options.duplicates == 'not-allowed') {
+    this.drag.startParent.moveTo(this, this.drag.startIndex);
+    moved = false;
+  } else if (duplicate && this.editor.options.duplicates == 'overwrite') {
+    this.parent._removeOtherDuplicateFields(this);
+  }
+
+  if (moved) {
+    var params = {
+      'node': this,
+      'startParent': this.drag.startParent,
+      'startIndex': this.drag.startIndex,
+      'endParent': this.parent,
+      'endIndex': this.parent.childs.indexOf(this)
+    };
+
+    if ((params.startParent != params.endParent) ||
+        (params.startIndex != params.endIndex)) {
+      // only register this action if the node is actually moved to another place
+      this.editor._onAction('moveNode', params);
+    }
   }
 
   document.body.style.cursor = this.drag.oldCursor;
+  util.removeClassName(this.dom.tr, 'dragging');
   this.editor.highlighter.unlock();
   delete this.drag;
 
@@ -2067,7 +2164,7 @@ Node.prototype.onEvent = function (event) {
 
       case 'blur':
       case 'change':
-        this._getDomField(true);
+        this._getDomField(true, type === "blur");
         this._updateDomField();
         if (this.field) {
           domField.innerHTML = this._escapeHTML(this.field);
@@ -2075,7 +2172,7 @@ Node.prototype.onEvent = function (event) {
         break;
 
       case 'input':
-        this._getDomField(true);
+        this._getDomField(true, false);
         this._updateDomField();
         break;
 

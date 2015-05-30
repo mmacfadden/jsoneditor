@@ -63,7 +63,9 @@ treemode._setOptions = function (options) {
     search: true,
     history: true,
     mode: 'tree',
-    name: undefined   // field name of root node
+    name: undefined,   // field name of root node
+    duplicates: 'allowed',
+    duplicateCallback: undefined
   };
 
   // copy all options
