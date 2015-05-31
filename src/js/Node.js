@@ -63,18 +63,43 @@ Node.prototype._updateEditability = function () {
 };
 
 /**
- * Get the path of this node
- * @return {String[]} Array containing the path to this node
+ * Gets the path to this node.  The path is represented
+ * as an array containing strings, integers, or arrays of the format
+ * ["fieldName", index").  A integer in the array signifies that the parent
+ * node is an array and the child is looked up by its index.  A string
+ * indicates that the parent is an object node and that the child is
+ * looked up by field name.  Since fields within an object can be duplicated
+ * while editing, when specifying a string the FIRST field with the matching
+ * name will be used.  To access an "invalid" duplicate field, the array
+ * element is used.  The first element in the array indicates the field name.
+ * The second element in the array specifies the number (in order) of the
+ * duplicate field.  For example if an object has three fields called foo
+ * the path ["foo"] will return the third child with field foo.  The path
+ * [['foo', 0]] will return the first child with the field foo.  The path
+ * [['foo', 1]] will return the second child with the field foo.
+ *
+ * @return {Array} Array containing the path to this node
  */
 Node.prototype.path = function () {
   var node = this;
   var path = [];
   while (node) {
-    var field = node.field != undefined ? node.field : node.index;
-    if (field !== undefined) {
-      path.unshift(field);
+    var parent = node.parent;
+    if (parent != null) {
+      if (parent.type == "object") {
+        var childNodes = parent.childFields[node.field];
+        var fieldIndex = childNodes.indexOf(node);
+        if (fieldIndex === (childNodes.length - 1)) {
+          path.unshift(node.field);
+        } else {
+          var pathElement = [node.field, fieldIndex];
+          path.unshift(pathElement);
+        }
+      } else {
+        path.unshift(node.index);
+      }
     }
-    node = node.parent;
+    node = parent;
   }
   return path;
 };
@@ -160,6 +185,7 @@ Node.prototype.setValue = function(value, type) {
   else if (this.type == 'object') {
     // object
     this.childs = [];
+    this.childFields = {};
     for (var childField in value) {
       if (value.hasOwnProperty(childField)) {
         childValue = value[childField];
@@ -401,6 +427,9 @@ Node.prototype.appendChild = function(node) {
       node.index = this.childs.length;
     }
     this.childs.push(node);
+    if (this.type == 'object') {
+      this._onChildAddedToField(node, node.field);
+    }
 
     if (this.expanded) {
       // insert into the DOM, before the appendRow
@@ -518,6 +547,8 @@ Node.prototype.insertBefore = function(node, beforeNode) {
 
     this.updateDom({'updateIndexes': true});
     node.updateDom({'recurse': true});
+
+    this._onChildAddedToField(node, node.field);
   }
 };
 
@@ -839,6 +870,10 @@ Node.prototype.removeChild = function(node) {
   if (this.childs) {
     var index = this.childs.indexOf(node);
 
+    if (this.type === 'object' && this.childFields[node.field] !== undefined) {
+      this._onChildRemovedFromField(node, node.field);
+    }
+
     if (index != -1) {
       node.hide();
 
@@ -880,6 +915,10 @@ Node.prototype.changeType = function (newType) {
     return;
   }
 
+  if (this.childFields) {
+    delete this.childFields;
+  }
+
   if ((newType == 'string' || newType == 'auto') &&
       (oldType == 'string' || oldType == 'auto')) {
     // this is an easy change
@@ -909,6 +948,8 @@ Node.prototype.changeType = function (newType) {
       if (!this.childs) {
         this.childs = [];
       }
+
+      this.childFields = {};
 
       this.childs.forEach(function (child, index) {
         child.clearDom();
@@ -1147,7 +1188,7 @@ Node.prototype._updateDomField = function () {
  *                            case of invalid data
  * @private
  */
-Node.prototype._getDomField = function(silent) {
+Node.prototype._getDomField = function(silent, final) {
   if (this.dom.field && this.fieldEditable) {
     this.fieldInnerText = util.getInnerText(this.dom.field);
   }
@@ -1159,16 +1200,60 @@ Node.prototype._getDomField = function(silent) {
       if (field !== this.field) {
         var oldField = this.field;
         this.field = field;
+        this.parent._onChildFieldRenamed(this, oldField, field);
+
         this.editor._onAction('editField', {
           'node': this,
           'oldValue': oldField,
           'newValue': field,
           'oldSelection': this.editor.selection,
-          'newSelection': this.editor.getSelection()
+          'newSelection': this.editor.getSelection(),
+          'duplicate' : this.parent._isDuplicateField(this.field)
         });
+      }
+
+      var domField = this.dom.field;
+
+      // Handle duplicate field edits
+      if (this.parent._isDuplicateField(this.field) && final) {
+        if (this.editor.options.duplicates === 'overwrite') {
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {
+              var remove = callback(node);
+              if (remove) {
+                node.parent._removeOtherDuplicateFields(node);
+              } else {
+                util.selectContentEditable(domField);
+                domField.focus();
+              }
+            }, 0);
+          } else {
+            this.parent._removeOtherDuplicateFields(this);
+          }
+        } else if (this.editor.options.duplicates === 'not-allowed') {
+          util.selectContentEditable(domField);
+          domField.focus();
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {callback(node)}, 0)
+          }
+        } else {
+          var callback = this.editor.options.duplicateCallback;
+          if (callback) {
+            // we do this asynchronously so the current event can propagate.
+            var node = this;
+            setTimeout(function() {callback(node)}, 0)
+          }
+        }
       }
     }
     catch (err) {
+      console.log(err);
       this.field = undefined;
       // TODO: sent an action here, with the new, invalid value?
       if (silent !== true) {
@@ -1176,6 +1261,143 @@ Node.prototype._getDomField = function(silent) {
       }
     }
   }
+};
+
+/**
+ * A helper method that updates any duplicate field markings in an object node.
+ * @param childField The name of the field to update.
+ * @private
+ */
+Node.prototype._updateDuplicateChildFields = function(childField) {
+  var childNodes = this.childFields[childField];
+  if (childNodes !== undefined) {
+    for (var i = 0; i < childNodes.length - 1; i++) {
+      this._markDuplicateField(childNodes[i]);
+    }
+    this._unmarkDuplicateField(childNodes[childNodes.length - 1]);
+  }
+};
+
+/**
+ * A helper method to render a child node as a duplicate.
+ * @param child The child to mark as a duplicate.
+ * @private
+ */
+Node.prototype._markDuplicateField = function(child) {
+  if (child.dom.field) {
+    util.addClassName(child.dom.field, 'duplicate');
+    child.dom.tr.title = "Duplicate field";
+    child.dom.field.title = "Duplicate field";
+  }
+};
+
+/**
+ * A helper method stop rendering a child node as a duplicate.
+ * @param child The child to mark as not a duplicate.
+ * @private
+ */
+Node.prototype._unmarkDuplicateField = function(child) {
+  if (child.dom.field) {
+    util.removeClassName(child.dom.field, 'duplicate');
+    child.dom.tr.title = "";
+    child.dom.field.title = "";
+  }
+};
+
+/**
+ * A helper function to determine if the given field in an object node has
+ * more than one node with that field name.
+ * @param field The field name to check
+ * @return {boolean} true if there is more than one object with the same field.
+ * @private
+ */
+Node.prototype._isDuplicateField = function(field) {
+  return this.type == "object" && this.childFields[field] && this.childFields[field].length > 1;
+};
+
+/**
+ * A helper method that removes all other nodes in the same object with the
+ * same field name as the one passed in.  After the method call, the passed
+ * in node will be the only remaining child with the given field name.
+ * @param child The child to keep.
+ * @private
+ */
+Node.prototype._removeOtherDuplicateFields = function(child) {
+  var children = this.childFields[child.field];
+  if (children) {
+    for(var i = 0; i < children.length; i++) {
+      var otherChild = children[i];
+      if (otherChild != child) {
+        this.removeChild(otherChild);
+      }
+    }
+  }
+};
+
+/**
+ * A helper method stop rendering a child node as a duplicate.
+ * @param child The child to mark as not a duplicate.
+ * @private
+ */
+Node.prototype._onChildFieldRenamed = function(child, oldField, field) {
+  this._onChildRemovedFromField(child, oldField);
+  this._onChildAddedToField(child, field);
+};
+
+/**
+ * A help method to update child field mappings for an object node, when a
+ * child no longer possesses the field name.
+ *
+ * @param child The child that was removed.
+ * @param oldField The old field name.
+ * @private
+ */
+Node.prototype._onChildRemovedFromField = function(child, oldField) {
+  var fields = this.childFields[oldField];
+
+  if (fields.length === 1) {
+    // We are removing the only field.  Simply delete.
+    delete this.childFields[oldField];
+  } else {
+    var fieldIndex = fields.indexOf(child);
+    fields.splice(fieldIndex, 1);
+  }
+
+  this._updateDuplicateChildFields(oldField);
+};
+
+/**
+ * A helper method to update the child field mappings when a child is set to
+ * this field name.
+ *
+ * @param child The child be set
+ * @param field The new field name.
+ * @private
+ */
+Node.prototype._onChildAddedToField = function(child, field) {
+  var childFields = this.childFields[field];
+  if (childFields === undefined) {
+    childFields = [];
+    this.childFields[field] = childFields;
+  }
+
+  var childIndex = this.childs.indexOf(child);
+  var inserted = false;
+  for(var i = 0; i < childFields.length; i++) {
+    var otherChild = childFields[i];
+    var otherIndex = this.childs.indexOf(otherChild);
+    if (child == otherChild || childIndex < otherIndex) {
+      this.childFields[field].splice(i, 0, child);
+      inserted = true;
+      break;
+    }
+  }
+
+  if (!inserted) {
+    this.childFields[field].push(child);
+  }
+
+  this._updateDuplicateChildFields(field);
 };
 
 /**
@@ -1248,6 +1470,7 @@ Node.prototype.getDom = function() {
  */
 Node.prototype._onDragStart = function (event) {
   var node = this;
+
   if (!this.mousemove) {
     this.mousemove = util.addEventListener(document, 'mousemove',
         function (event) {
@@ -1271,6 +1494,7 @@ Node.prototype._onDragStart = function (event) {
     'level': this.getLevel()
   };
   document.body.style.cursor = 'move';
+  util.addClassName(this.dom.tr, 'dragging');
 
   event.preventDefault();
 };
@@ -1409,6 +1633,15 @@ Node.prototype._onDrag = function (event) {
     // update the dragging parameters when moved
     this.drag.mouseX = mouseX;
     this.drag.level = this.getLevel();
+
+    if (this.parent._isDuplicateField(this.field) &&
+        this.editor.options.duplicates == 'not-allowed') {
+      util.addClassName(this.dom.tr, 'not-allowed');
+      document.body.style.cursor = 'not-allowed';
+    } else {
+      document.body.style.cursor = 'move';
+      util.removeClassName(this.dom.tr, 'not-allowed');
+    }
   }
 
   // auto scroll when hovering around the top of the editor
@@ -1423,20 +1656,33 @@ Node.prototype._onDrag = function (event) {
  * @private
  */
 Node.prototype._onDragEnd = function (event) {
-  var params = {
-    'node': this,
-    'startParent': this.drag.startParent,
-    'startIndex': this.drag.startIndex,
-    'endParent': this.parent,
-    'endIndex': this.parent.childs.indexOf(this)
-  };
-  if ((params.startParent != params.endParent) ||
-      (params.startIndex != params.endIndex)) {
-    // only register this action if the node is actually moved to another place
-    this.editor._onAction('moveNode', params);
+  var moved = true;
+  var duplicate = this.parent._isDuplicateField(this.field);
+  if (duplicate && this.editor.options.duplicates == 'not-allowed') {
+    this.drag.startParent.moveTo(this, this.drag.startIndex);
+    moved = false;
+  } else if (duplicate && this.editor.options.duplicates == 'overwrite') {
+    this.parent._removeOtherDuplicateFields(this);
+  }
+
+  if (moved) {
+    var params = {
+      'node': this,
+      'startParent': this.drag.startParent,
+      'startIndex': this.drag.startIndex,
+      'endParent': this.parent,
+      'endIndex': this.parent.childs.indexOf(this)
+    };
+
+    if ((params.startParent != params.endParent) ||
+        (params.startIndex != params.endIndex)) {
+      // only register this action if the node is actually moved to another place
+      this.editor._onAction('moveNode', params);
+    }
   }
 
   document.body.style.cursor = this.drag.oldCursor;
+  util.removeClassName(this.dom.tr, 'dragging');
   this.editor.highlighter.unlock();
   delete this.drag;
 
@@ -1499,6 +1745,59 @@ Node.prototype.setHighlight = function (highlight) {
         child.setHighlight(highlight);
       });
     }
+  }
+};
+
+/**
+ * Gets a node by its relative path from this node.  The path is represented
+ * as an array containing strings, integers, or arrays of the format
+ * ["fieldName", index").  A integer in the array signifies that the parent
+ * node is an array and the child is looked up by its index.  A string
+ * indicates that the parent is an object node and that the child is
+ * looked up by field name.  Since fields within an object can be duplicated
+ * while editing, when specifying a string the FIRST field with the matching
+ * name will be used.  To access an "invalid" duplicate field, the array
+ * element is used.  The first element in the array indicates the field name.
+ * The second element in the array specifies the number (in order) of the
+ * duplicate field.  For example if an object has three fields called foo
+ * the path ["foo"] will return the third child with field foo.  The path
+ * [['foo', 0]] will return the first child with the field foo.  The path
+ * [['foo', 1]] will return the second child with the field foo.
+ *
+ * @param path An array representing the path to a node, from this node
+ *
+ * @return {Node} the node corresponding to the path, or null.
+ */
+Node.prototype.getChild = function(path) {
+  var clonedPath = path.slice(0);
+  return this._getChild(clonedPath, this);
+};
+
+/**
+ * A recursive help method to get a child of this node by its relative path.
+ * @param path The relative path from this node to the desired node.
+ * @return {Node} The node with the relative path form this one, or null
+ * if it does not exist.
+ * @private
+ */
+Node.prototype._getChild = function(path) {
+  if (path.length == 0) {
+    return this;
+  }
+
+  var element = path.shift();
+
+  if (this.type == "array" && typeof element === "number" && this.childs[element] !== undefined) {
+    var child = this.childs[element];
+    return child._getChild(path);
+  } else if (this.type == "object" && typeof element == "string" && this.childFields[element] !== undefined) {
+    var child = this.childFields[element][this.childFields[element].length - 1];
+    return child._getChild(path);
+  } else if (this.type == "object" && Array.isArray(element) && this.childFields[element[0]] !== undefined) {
+    var child = this.childFields[element[0]][element[1]];
+    return child._getChild(path);
+  } else {
+    return null;
   }
 };
 
@@ -1870,7 +2169,7 @@ Node.prototype.onEvent = function (event) {
 
       case 'blur':
       case 'change':
-        this._getDomField(true);
+        this._getDomField(true, type === "blur");
         this._updateDomField();
         if (this.field) {
           domField.innerHTML = this._escapeHTML(this.field);
@@ -1878,7 +2177,7 @@ Node.prototype.onEvent = function (event) {
         break;
 
       case 'input':
-        this._getDomField(true);
+        this._getDomField(true, false);
         this._updateDomField();
         break;
 

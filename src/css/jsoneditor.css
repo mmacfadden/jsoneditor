@@ -85,6 +85,14 @@
   border-radius: 2px;
 }
 
+.jsoneditor .field.duplicate,
+.jsoneditor .field.duplicate:hover,
+.jsoneditor .field.duplicate:focus {
+  background-color: pink;
+  border: 1px solid red;
+  border-radius: 2px;
+}
+
 .jsoneditor div.tree button {
   width: 24px;
   height: 24px;
@@ -186,6 +194,16 @@
   border: none;
   background-color: white;
   resize: none;
+}
+
+.jsoneditor tr.dragging {
+  cursor: move;
+}
+
+.jsoneditor tr.dragging.not-allowed,
+.jsoneditor tr.dragging.not-allowed button.dragarea,
+.jsoneditor tr.dragging.not-allowed button.contextmenu {
+  cursor: not-allowed;
 }
 
 .jsoneditor tr.highlight {

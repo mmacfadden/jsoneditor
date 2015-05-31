@@ -70,7 +70,9 @@ treemode._setOptions = function (options) {
     history: true,
     mode: 'tree',
     name: undefined,   // field name of root node
-    completeOnEnter: false
+    completeOnEnter: false,
+    duplicates: 'allowed',
+    duplicateCallback: undefined
   };
 
   // copy all options
@@ -261,6 +263,30 @@ treemode.search = function (text) {
   }
 
   return results;
+};
+
+/**
+ * Gets a node by its relative path from this node.  The path is represented
+ * as an array containing strings, integers, or arrays of the format
+ * ["fieldName", index").  A integer in the array signifies that the parent
+ * node is an array and the child is looked up by its index.  A string
+ * indicates that the parent is an object node and that the child is
+ * looked up by field name.  Since fields within an object can be duplicated
+ * while editing, when specifying a string the FIRST field with the matching
+ * name will be used.  To access an "invalid" duplicate field, the array
+ * element is used.  The first element in the array indicates the field name.
+ * The second element in the array specifies the number (in order) of the
+ * duplicate field.  For example if an object has three fields called foo
+ * the path ["foo"] will return the first child with field foo.  The path
+ * [['foo', 0]] will return the second child with the field foo.  The path
+ * [['foo', 1]] will return the third child with the field foo.
+ *
+ * @param path An array representing the path to a node from the root node.
+ *
+ * @return {Node} the node corresponding to the path, or null.
+ */
+treemode.getNode = function(path) {
+  return this.node.getChild(path);
 };
 
 /**
